@@ -140,17 +140,17 @@ const AdminDashboard: React.FC = () => {
   };
 
   const handleAddDomain = () => {
-    toast.info('Redirecting to domain setup...');
+    toast.info('Opening domain setup...');
     setTimeout(() => {
-      window.location.href = '/onboarding?tab=provisioning';
-    }, 500);
+      window.location.href = '/domains';
+    }, 300);
   };
 
   const handleCreateMore = () => {
-    toast.info('Redirecting to provisioning wizard...');
+    toast.info('Opening provisioning wizard...');
     setTimeout(() => {
-      window.location.href = '/onboarding?tab=provisioning';
-    }, 500);
+      window.location.href = '/provisioning';
+    }, 300);
   };
 
   const handleManageBilling = () => {
