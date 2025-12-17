@@ -29,6 +29,7 @@ import {
   VpnKey as KeyIcon,
   PlaylistAddCheck as OnboardingIcon,
   HealthAndSafety as HealthIcon,
+  Group as GroupIcon,
 } from '@mui/icons-material';
 import { SnackbarProvider } from 'notistack';
 import UserManagementPanel from './admin/UserManagementPanel';
@@ -38,6 +39,8 @@ import CreditLedgerPanel from './admin/CreditLedgerPanel';
 import ApiKeysPanel from './admin/ApiKeysPanel';
 import OnboardingStepper from './admin/OnboardingStepper';
 import DomainHealthMonitor from './admin/DomainHealthMonitor';
+import TrialUsersManagement from './admin/TrialUsersManagement';
+import AdminUserActions from './admin/AdminUserActions';
 import { useAppContext } from '../context/AppContext';
 import kumoMtaService from '../services/kumoMtaService';
 
@@ -131,6 +134,7 @@ const EventTicker: React.FC = () => {
 const AdminDashboard: React.FC = () => {
   const [currentTab, setCurrentTab] = useState(0);
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
+  const [selectedUser, setSelectedUser] = useState<any>(null);
   const { impersonationMode } = useAppContext();
 
   const handleTabChange = (_event: React.SyntheticEvent, newValue: number) => {
@@ -147,7 +151,10 @@ const AdminDashboard: React.FC = () => {
 
   const handleImpersonate = (user: any) => {
     console.log('Impersonating user:', user);
-    // In a real app, this would switch to the user's dashboard view
+  };
+
+  const handleSelectUser = (user: any) => {
+    setSelectedUser(user);
   };
 
   return (
@@ -257,6 +264,7 @@ const AdminDashboard: React.FC = () => {
             >
               <Tab icon={<DashboardIcon />} label="Analytics" iconPosition="start" />
               <Tab icon={<PeopleIcon />} label="User Management" iconPosition="start" />
+              <Tab icon={<GroupIcon />} label="Trial Users" iconPosition="start" />
               <Tab icon={<AssignmentIcon />} label="Activity Logs" iconPosition="start" />
               <Tab icon={<WalletIcon />} label="Credits" iconPosition="start" />
               <Tab icon={<KeyIcon />} label="API Keys" iconPosition="start" />
@@ -277,24 +285,30 @@ const AdminDashboard: React.FC = () => {
           </TabPanel>
 
           <TabPanel value={currentTab} index={2}>
-            <ActivityLogsPanel />
+            <TrialUsersManagement onSelectUser={handleSelectUser} />
           </TabPanel>
 
           <TabPanel value={currentTab} index={3}>
-            <CreditLedgerPanel />
+            <ActivityLogsPanel />
           </TabPanel>
 
           <TabPanel value={currentTab} index={4}>
-            <ApiKeysPanel />
+            <CreditLedgerPanel />
           </TabPanel>
 
           <TabPanel value={currentTab} index={5}>
-            <OnboardingStepper />
+            <ApiKeysPanel />
           </TabPanel>
 
           <TabPanel value={currentTab} index={6}>
+            <OnboardingStepper />
+          </TabPanel>
+
+          <TabPanel value={currentTab} index={7}>
             <DomainHealthMonitor />
           </TabPanel>
+
+          <AdminUserActions user={selectedUser} onClose={() => setSelectedUser(null)} />
         </Container>
       </Box>
     </SnackbarProvider>

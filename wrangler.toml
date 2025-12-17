@@ -1,0 +1,15 @@
+#:schema node_modules/wrangler/config-schema.json
+name = "inboxgrove"
+compatibility_date = "2024-12-10"
+
+# Cloudflare Pages configuration
+pages_build_output_dir = "dist"
+
+# Environment-specific variables
+[env.production.vars]
+VITE_API_URL = "https://api.inboxgrove.com"
+VITE_ENVIRONMENT = "production"
+
+[env.preview.vars]
+VITE_API_URL = "https://preview-api.inboxgrove.com"
+VITE_ENVIRONMENT = "preview"

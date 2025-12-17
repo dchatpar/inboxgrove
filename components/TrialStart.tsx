@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { CheckCircle2, CreditCard, Rocket, Shield } from 'lucide-react';
 import { trialApi, StartTrialPayload, TrialPlan } from '@/services/trialApi';
@@ -13,6 +14,7 @@ const basePlans: Plan[] = [
 ];
 
 const TrialStart: React.FC = () => {
+  const navigate = useNavigate();
   const [step, setStep] = useState<'plan' | 'otp' | 'success'>('plan');
   const [email, setEmail] = useState('');
   const [otp, setOtp] = useState('');
@@ -85,7 +87,7 @@ const TrialStart: React.FC = () => {
           localStorage.setItem('access_token', result.data.access_token);
         }
         setStep('success');
-        setTimeout(() => window.location.href = '/dashboard', 2000);
+        setTimeout(() => navigate('/trial/dashboard'), 2000);
         return;
       }
       setError(result.error || 'Failed to verify code');
@@ -103,10 +105,10 @@ const TrialStart: React.FC = () => {
       trialId: result.data?.trialId || '', 
       expiresAt: result.data?.expiresAt || new Date(Date.now() + 7*24*60*60*1000).toISOString()
     });
-    localStorage.setItem('trialData', JSON.stringify(res.data));
+    localStorage.setItem('trialData', JSON.stringify(result.data));
     localStorage.setItem('userEmail', email);
     setStep('success');
-    setTimeout(() => window.location.href = '/dashboard', 2000);
+    setTimeout(() => navigate('/trial/dashboard'), 2000);
   };
 
   return (

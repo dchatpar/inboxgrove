@@ -8,6 +8,8 @@ const navItems: NavItem[] = [
   { label: 'How it Works', href: '#how-it-works' },
   { label: 'Pricing', href: '#pricing' },
   { label: 'FAQ', href: '#faq' },
+  { label: 'Domains', href: '/domains' },
+  { label: 'Dashboard', href: '/dashboard' },
   { label: 'Admin', href: '/admin' },
 ];
 
