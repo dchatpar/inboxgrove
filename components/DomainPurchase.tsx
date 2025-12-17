@@ -3,6 +3,7 @@ import { motion } from 'framer-motion';
 import { Globe, CheckCircle, AlertCircle, ShoppingCart } from 'lucide-react';
 import EnomService, { EnomCredentials } from '../services/enomService';
 import { useToast } from './ToastProvider';
+import stripeService from '../services/stripeService';
 
 interface DomainPurchaseProps {
   onPurchased?: (domain: string) => void;
@@ -22,6 +23,7 @@ const DomainPurchase: React.FC<DomainPurchaseProps> = ({ onPurchased }) => {
   const [available, setAvailable] = useState<boolean | null>(null);
   const [purchasing, setPurchasing] = useState(false);
   const [years, setYears] = useState('1');
+  const [pricePreview, setPricePreview] = useState(12);
 
   const handleCheck = async () => {
     if (!domain.includes('.')) {
@@ -44,13 +46,24 @@ const DomainPurchase: React.FC<DomainPurchaseProps> = ({ onPurchased }) => {
   const handlePurchase = async () => {
     setPurchasing(true);
     try {
-      const res = await EnomService.purchaseDomain(defaultCreds, domain, years);
-      if (res.ok) {
-        toast.success('Domain purchased successfully');
-        onPurchased?.(domain);
-      } else {
-        toast.error(res.message || 'Purchase failed');
+      // First, create a Stripe Checkout session to collect payment
+      const checkout = await stripeService.createCheckoutSession({
+        domain,
+        years: Number(years),
+        quantity: Number(years),
+        metadata: { domain, years },
+        successUrl: `${window.location.origin}/domains?status=success`,
+        cancelUrl: `${window.location.origin}/domains?status=cancel`,
+      });
+
+      if (!checkout.ok || !checkout.data?.url) {
+        toast.error(checkout.error || 'Unable to start checkout');
+        return;
       }
+
+      // Optionally, also trigger eNom purchase after payment success (backend should handle webhook)
+      // Frontend redirects to Stripe Checkout URL
+      window.location.href = checkout.data.url;
     } catch (e: any) {
       toast.error('Purchase error');
     } finally {
@@ -77,7 +90,7 @@ const DomainPurchase: React.FC<DomainPurchaseProps> = ({ onPurchased }) => {
         </select>
         <button onClick={handleCheck} disabled={checking} className="px-4 py-3 bg-slate-800 border border-border rounded-lg text-white">Check</button>
         <button onClick={handlePurchase} disabled={!available || purchasing} className="px-4 py-3 bg-primary text-white rounded-lg flex items-center gap-2">
-          <ShoppingCart size={16} /> Purchase
+          <ShoppingCart size={16} /> Checkout ${pricePreview}
         </button>
       </div>
       {available !== null && (
