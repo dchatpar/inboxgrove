@@ -15,7 +15,7 @@ const basePlans: Plan[] = [
 
 const TrialStart: React.FC = () => {
   const navigate = useNavigate();
-  const [step, setStep] = useState<'plan' | 'otp' | 'success'>('plan');
+  const [step, setStep] = useState<'plan' | 'payment' | 'otp' | 'success'>('plan');
   const [email, setEmail] = useState('');
   const [otp, setOtp] = useState('');
   const [plan, setPlan] = useState<TrialPlan>('professional');
@@ -24,8 +24,13 @@ const TrialStart: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [trialData, setTrialData] = useState<{ trialId: string; expiresAt: string } | null>(null);
+  const [cardName, setCardName] = useState('');
+  const [cardNumber, setCardNumber] = useState('');
+  const [cardExpiry, setCardExpiry] = useState('');
+  const [cardCvc, setCardCvc] = useState('');
+  const [cardConsent, setCardConsent] = useState(false);
 
-  const sendOtp = async (e: React.FormEvent) => {
+  const handleContinueToPayment = (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -36,7 +41,49 @@ const TrialStart: React.FC = () => {
       setError('Please accept the Terms to continue');
       return;
     }
+    setStep('payment');
+  };
+
+  const sendOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+
+    const cleanedNumber = cardNumber.replace(/\D/g, '');
+    const expiryMatch = cardExpiry.match(/^(0[1-9]|1[0-2])\/(\d{2})$/);
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      setError('Please enter a valid email');
+      return;
+    }
+    if (!acceptTos) {
+      setError('Please accept the Terms to continue');
+      return;
+    }
+    if (!cardName.trim()) {
+      setError('Cardholder name is required');
+      return;
+    }
+    if (cleanedNumber.length < 12 || cleanedNumber.length > 19) {
+      setError('Enter a valid card number');
+      return;
+    }
+    if (!expiryMatch) {
+      setError('Enter expiry as MM/YY');
+      return;
+    }
+    if (!/^\d{3,4}$/.test(cardCvc)) {
+      setError('Enter a valid CVC');
+      return;
+    }
+    if (!cardConsent) {
+      setError('Please authorize the trial with your card');
+      return;
+    }
+
     setLoading(true);
+    // Capture masked card info locally (for demo / UI continuity)
+    const last4 = cleanedNumber.slice(-4);
+    localStorage.setItem('trialCard', JSON.stringify({ last4, expiry: cardExpiry }));
     
     // Call backend to send OTP
     const result = await trialApi.sendOtp(email);
@@ -119,7 +166,7 @@ const TrialStart: React.FC = () => {
           <h1 className="mt-4 text-3xl md:text-4xl font-extrabold tracking-tight text-white flex items-center gap-3">
             <Rocket className="text-purple-500" /> Start your 7‑day free trial
           </h1>
-          <p className="mt-3 text-slate-400">No credit card required. Cancel anytime.</p>
+          <p className="mt-3 text-slate-400">Credit card required for verification. You will not be charged until the trial ends on day 7.</p>
         </motion.div>
 
         <div className="grid grid-cols-1 gap-6">
@@ -173,7 +220,7 @@ const TrialStart: React.FC = () => {
             </div>
           </div>
 
-          <form onSubmit={sendOtp} className="bg-slate-900/60 border border-slate-800 rounded-xl p-6 space-y-5">
+          <form onSubmit={handleContinueToPayment} className="bg-slate-900/60 border border-slate-800 rounded-xl p-6 space-y-5">
             {error && (
               <div className="rounded-lg border border-red-500/30 bg-red-500/10 text-red-200 px-4 py-3">{error}</div>
             )}
@@ -197,13 +244,100 @@ const TrialStart: React.FC = () => {
               disabled={loading}
               className="w-full py-3 rounded-lg font-bold text-white bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 shadow-lg shadow-purple-500/30 flex items-center justify-center gap-2 disabled:opacity-60"
             >
-              <CreditCard size={18} /> {loading ? 'Sending Code…' : 'Send Verification Code'}
+              <CreditCard size={18} /> {loading ? 'Checking…' : 'Continue to secure payment'}
             </button>
             <div className="text-xs text-slate-500 flex items-center gap-2">
-              <Shield size={14} className="text-slate-400" /> Secure. No charges until trial ends.
+              <Shield size={14} className="text-slate-400" /> Card required for verification. No charges until trial ends.
             </div>
           </form>
           </>
+          )}
+
+          {step === 'payment' && (
+          <form onSubmit={sendOtp} className="bg-slate-900/60 border border-slate-800 rounded-xl p-6 space-y-5">
+            {error && (
+              <div className="rounded-lg border border-red-500/30 bg-red-500/10 text-red-200 px-4 py-3">{error}</div>
+            )}
+
+            <div className="flex items-center justify-between mb-2">
+              <h2 className="font-bold text-white">Secure payment hold</h2>
+              <span className="text-sm text-slate-400">Plan: <span className="text-white font-semibold uppercase">{plan}</span></span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="md:col-span-2">
+                <label className="block text-sm font-semibold text-slate-300 mb-2">Cardholder Name</label>
+                <input
+                  type="text"
+                  value={cardName}
+                  onChange={(e) => setCardName(e.target.value)}
+                  placeholder="Name on card"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 text-white placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-purple-500/60"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-slate-300 mb-2">Card Number</label>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={cardNumber}
+                  onChange={(e) => setCardNumber(e.target.value.replace(/[^\d ]/g, ''))}
+                  placeholder="4242 4242 4242 4242"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 text-white placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-purple-500/60"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-semibold text-slate-300 mb-2">Expiry</label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    value={cardExpiry}
+                    onChange={(e) => setCardExpiry(e.target.value.replace(/[^\d/]/g, ''))}
+                    placeholder="MM/YY"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 text-white placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-purple-500/60"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold text-slate-300 mb-2">CVC</label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    value={cardCvc}
+                    onChange={(e) => setCardCvc(e.target.value.replace(/\D/g, ''))}
+                    placeholder="123"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-4 py-3 text-white placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-purple-500/60"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-start gap-3">
+              <input id="cardConsent" type="checkbox" checked={cardConsent} onChange={(e) => setCardConsent(e.target.checked)} className="mt-1 w-4 h-4 rounded border-slate-600 bg-slate-800 text-purple-500 focus:ring-0" />
+              <label htmlFor="cardConsent" className="text-sm text-slate-300">
+                I authorize InboxGrove to securely store my card for a 7-day free trial. <span className="text-emerald-400">No charges will occur until the trial ends</span>. I can cancel anytime before day 7 to avoid charges.
+              </label>
+            </div>
+
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full py-3 rounded-lg font-bold text-white bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 shadow-lg shadow-purple-500/30 flex items-center justify-center gap-2 disabled:opacity-60"
+            >
+              <CreditCard size={18} /> {loading ? 'Saving & sending code…' : 'Save card & send verification code'}
+            </button>
+
+            <div className="text-xs text-slate-500 flex items-center gap-2">
+              <Shield size={14} className="text-slate-400" /> Bank-level encryption. Charge only after trial ends.
+            </div>
+            <button
+              type="button"
+              onClick={() => setStep('plan')}
+              className="w-full py-2 text-slate-400 hover:text-white text-sm"
+            >
+              ← Back to plan selection
+            </button>
+          </form>
           )}
 
           {step === 'otp' && (

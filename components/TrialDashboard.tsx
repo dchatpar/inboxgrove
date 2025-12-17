@@ -1,10 +1,12 @@
 import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Clock, CreditCard, CheckCircle2, AlertCircle, Mail, Calendar, TrendingUp, Rocket, Server, Globe } from 'lucide-react';
 import Provisioning from './Provisioning';
 import AdminDashboard from './AdminDashboard';
 
 const TrialDashboard: React.FC = () => {
+  const navigate = useNavigate();
   const [trialData, setTrialData] = useState<{ trialId: string; expiresAt: string } | null>(null);
   const [userEmail, setUserEmail] = useState('');
   const [daysLeft, setDaysLeft] = useState(0);
@@ -25,7 +27,7 @@ const TrialDashboard: React.FC = () => {
     const storedEmail = localStorage.getItem('userEmail');
     
     if (!storedTrial) {
-      window.location.href = '/onboarding';
+      navigate('/onboarding', { replace: true, state: { reason: 'missing_session' } });
       return;
     }
 
@@ -43,7 +45,9 @@ const TrialDashboard: React.FC = () => {
       if (days === 0) {
         setShowPayment(true);
         setIsTrialExpired(true);
-        setActiveTab('overview'); // Switch to overview when expired
+        setActiveTab('overview');
+        localStorage.removeItem('access_token');
+        localStorage.removeItem('refresh_token');
       } else {
         setIsTrialExpired(false);
       }
