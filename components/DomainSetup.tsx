@@ -1,32 +1,50 @@
-import React, { useMemo, useState } from 'react';
-import { motion } from 'framer-motion';
-import { CheckCircle, Globe, KeyRound, FileDown, Cloud, Shield } from 'lucide-react';
+import React, { useMemo, useState, useEffect } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { CheckCircle, Globe, KeyRound, FileDown, Cloud, Shield, ArrowRight, ArrowLeft, Loader, Check, AlertCircle } from 'lucide-react';
 import cloudflareService, { CloudflareCredentials } from '../services/cloudflareService';
-import { DkimPair, generateDnsRecords, toCloudflareRecords, humanInstructions, toCsv } from '../services/dnsRecordGenerator';
+import { DkimPair, generateDnsRecords, toCloudflareRecords } from '../services/dnsRecordGenerator';
 import { queryTxt } from '../services/dnsVerifyService';
-import { Copy } from 'lucide-react';
 import { generateDkimKeyPair, extractPublicKeyBase64 } from '../services/dkimService';
-import { getGuide } from '../services/providerGuides';
 import kumoMtaService, { KumoCredentials } from '../services/kumoMtaService';
 
+type WizardStep = 'domain' | 'cloudflare' | 'dkim' | 'deploy' | 'verify' | 'complete';
+
+interface StepConfig {
+  id: WizardStep;
+  title: string;
+  subtitle: string;
+}
+
+const steps: StepConfig[] = [
+  { id: 'domain', title: 'Domain Details', subtitle: 'Enter your domain information' },
+  { id: 'cloudflare', title: 'Connect Cloudflare', subtitle: 'Authenticate with your CF account' },
+  { id: 'dkim', title: 'Generate DKIM Keys', subtitle: 'Create email authentication keys' },
+  { id: 'deploy', title: 'Deploy Infrastructure', subtitle: 'Provision mail servers & DNS' },
+  { id: 'verify', title: 'Verify Setup', subtitle: 'Confirm DNS propagation' },
+  { id: 'complete', title: 'Complete', subtitle: 'Your domain is ready' },
+];
+
 const DomainSetup: React.FC = () => {
-  const [domain, setDomain] = useState('example.com');
-  const [selector1, setSelector1] = useState('s1');
-  const [selector2, setSelector2] = useState('s2');
-  const [dkim1, setDkim1] = useState('');
-  const [dkim2, setDkim2] = useState('');
+  const [currentStep, setCurrentStep] = useState<WizardStep>('domain');
+  const [domain, setDomain] = useState('');
   const [cfToken, setCfToken] = useState('');
   const [cfZoneId, setCfZoneId] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [resultMsg, setResultMsg] = useState('');
-  const [providerGuide, setProviderGuide] = useState('Cloudflare');
-  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [cfConnected, setCfConnected] = useState(false);
+  const [selector1] = useState('s1');
+  const [selector2] = useState('s2');
+  const [dkim1, setDkim1] = useState('');
+  const [dkim2, setDkim2] = useState('');
   const [generatedKeys, setGeneratedKeys] = useState<{ s1?: { pub: string; priv: string }; s2?: { pub: string; priv: string } }>({});
-  const [kumoBaseUrl, setKumoBaseUrl] = useState('http://46.21.157.216:8001');
-  const [kumoApiKey, setKumoApiKey] = useState('14456a6f18f952990da9e2a3e5d401d8cd321a0f4c8457843eaf6d91dca15f4a');
-  const [kumoMsg, setKumoMsg] = useState('');
-  const [kumoWorking, setKumoWorking] = useState(false);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(false);
+  const [deployStatus, setDeployStatus] = useState<string[]>([]);
+  const [verifyResults, setVerifyResults] = useState<Record<string, { ok: boolean; values: string[] }>>({});
+  const [smtpCredentials, setSmtpCredentials] = useState<{ username: string; password: string } | null>(null);
+  
+  const [kumoBaseUrl] = useState('http://46.21.157.216:8001');
+  const [kumoApiKey] = useState('14456a6f18f952990da9e2a3e5d401d8cd321a0f4c8457843eaf6d91dca15f4a');
   const [mailIps] = useState(['46.21.157.216', '46.21.157.209', '46.21.157.222', '46.21.159.173', '46.21.159.189']);
+  
   // Load DKIM from storage on mount
   React.useEffect(() => {
     try {
@@ -40,9 +58,11 @@ const DomainSetup: React.FC = () => {
     } catch {}
   }, []);
 
+  const currentStepIndex = steps.findIndex(s => s.id === currentStep);
+
   const dkimPairs: DkimPair[] = useMemo(() => ([
-    { selector: selector1 || 's1', publicKey: dkim1 },
-    { selector: selector2 || 's2', publicKey: dkim2 },
+    { selector: selector1, publicKey: dkim1 },
+    { selector: selector2, publicKey: dkim2 },
   ]), [selector1, selector2, dkim1, dkim2]);
 
   const generated = useMemo(() => generateDnsRecords(domain, dkimPairs, {
@@ -52,389 +72,604 @@ const DomainSetup: React.FC = () => {
 
   const cfRecords = useMemo(() => toCloudflareRecords(generated), [generated]);
 
-  const bindZone = useMemo(() => cloudflareService.generateBindZone(domain, cfRecords as any), [domain, cfRecords]);
-
-  const downloadCsv = () => {
-    const csv = toCsv(generated);
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = `${domain.replace(/\./g,'_')}_dns.csv`;
-    document.body.appendChild(a); a.click();
-    document.body.removeChild(a); URL.revokeObjectURL(url);
+  // Validate domain step
+  const validateDomain = () => {
+    const newErrors: Record<string, string> = {};
+    if (!domain || !/^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$/.test(domain)) {
+      newErrors.domain = 'Enter a valid domain (e.g., example.com)';
+    }
+    setErrors(newErrors);
+    return Object.keys(newErrors).length === 0;
   };
 
-  const [verifying, setVerifying] = useState(false);
-  const [verifyResults, setVerifyResults] = useState<Record<string, { ok: boolean; values: string[] }>>({});
+  // Test Cloudflare connection
+  const testCloudflareConnection = async () => {
+    if (!cfToken) {
+      setErrors({ cfToken: 'API token is required' });
+      return;
+    }
+    setLoading(true);
+    setErrors({});
+    
+    try {
+      const creds: CloudflareCredentials = { apiToken: cfToken };
+      const z = await cloudflareService.findZoneByName(domain, creds);
+      
+      if (z.ok && z.data && z.data[0]) {
+        setCfZoneId(z.data[0].id);
+        setCfConnected(true);
+        setErrors({});
+      } else {
+        setErrors({ cfToken: z.error || 'Zone not found. Ensure domain is added to Cloudflare first.' });
+        setCfConnected(false);
+      }
+    } catch (e: any) {
+      setErrors({ cfToken: e?.message || 'Connection failed' });
+      setCfConnected(false);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Generate DKIM keys
+  const handleGenerateDkim = async (selector: 's1' | 's2') => {
+    setLoading(true);
+    try {
+      const pair = await generateDkimKeyPair();
+      const base64Pub = extractPublicKeyBase64(pair.publicKeyPem);
+      
+      if (selector === 's1') {
+        setDkim1(base64Pub);
+        setGeneratedKeys(k => {
+          const next = { ...k, s1: { pub: pair.publicKeyPem, priv: pair.privateKeyPem } };
+          localStorage.setItem('inboxgrove_dkim_bundle', JSON.stringify(next));
+          return next;
+        });
+      } else {
+        setDkim2(base64Pub);
+        setGeneratedKeys(k => {
+          const next = { ...k, s2: { pub: pair.publicKeyPem, priv: pair.privateKeyPem } };
+          localStorage.setItem('inboxgrove_dkim_bundle', JSON.stringify(next));
+          return next;
+        });
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Deploy infrastructure (KumoMTA + Cloudflare DNS)
+  const deployInfrastructure = async () => {
+    setLoading(true);
+    setDeployStatus([]);
+    const addStatus = (msg: string) => setDeployStatus(prev => [...prev, msg]);
+    
+    try {
+      const creds: KumoCredentials = { baseUrl: kumoBaseUrl, apiKey: kumoApiKey };
+      
+      // 1. Add domain to KumoMTA
+      addStatus('⏳ Adding domain to KumoMTA...');
+      const d = await kumoMtaService.createDomain({ domain, selector: selector1 }, creds);
+      if (!d.ok) {
+        addStatus(`❌ Domain creation failed: ${d.error}`);
+        return;
+      }
+      addStatus('✅ Domain added to KumoMTA');
+      
+      // 2. Generate DKIM via KumoMTA
+      addStatus('⏳ Generating DKIM keys...');
+      const dkim = await kumoMtaService.generateDkim({ domain, selector: selector1, key_size: 2048 }, creds);
+      if (!dkim.ok) {
+        addStatus(`❌ DKIM generation failed: ${dkim.error}`);
+        return;
+      }
+      if (dkim.data?.public_key) {
+        setDkim1(dkim.data.public_key);
+      }
+      addStatus('✅ DKIM keys generated');
+      
+      // 3. Get DNS records from KumoMTA
+      addStatus('⏳ Fetching DNS records...');
+      const dns = await kumoMtaService.getDnsRecords(domain, mailIps, creds);
+      if (!dns.ok || !dns.data) {
+        addStatus(`❌ DNS fetch failed: ${dns.error}`);
+        return;
+      }
+      addStatus('✅ DNS records prepared');
+      
+      // 4. Create SMTP user
+      addStatus('⏳ Creating SMTP user...');
+      const username = `user_${domain.replace(/\./g, '_')}`;
+      const password = `Pwd${Math.random().toString(36).slice(2, 10)}${Math.random().toString(36).slice(2, 10).toUpperCase()}!`;
+      const user = await kumoMtaService.createUser({ username, password, email: `admin@${domain}` }, creds);
+      if (!user.ok) {
+        addStatus(`❌ User creation failed: ${user.error}`);
+        return;
+      }
+      setSmtpCredentials({ username, password });
+      addStatus(`✅ SMTP user created: ${username}`);
+      
+      // 5. Apply DNS to Cloudflare
+      if (cfConnected && cfZoneId && dns.data) {
+        addStatus('⏳ Applying DNS records to Cloudflare...');
+        const cf = { apiToken: cfToken } as CloudflareCredentials;
+        const cfRecords = dns.data.records.map(r => ({
+          type: r.record_type,
+          name: r.name,
+          content: r.value,
+          ttl: r.ttl || 1,
+          priority: r.priority,
+        }));
+        
+        const results = await cloudflareService.createDnsRecords(cfZoneId, cfRecords as any, cf);
+        const failures = results.filter(r => !r.ok);
+        
+        if (failures.length === 0) {
+          addStatus('✅ All DNS records created in Cloudflare');
+        } else {
+          addStatus(`⚠️ Some records failed: ${failures.length}/${results.length}`);
+        }
+      }
+      
+      // 6. Reload KumoMTA
+      addStatus('⏳ Reloading mail server config...');
+      const reload = await kumoMtaService.reloadConfig(creds);
+      if (reload.ok) {
+        addStatus('✅ Mail server reloaded successfully');
+      } else {
+        addStatus('⚠️ Reload failed - manual reload may be required');
+      }
+      
+      addStatus('🎉 Deployment complete!');
+      
+      // Auto-advance to verify step
+      setTimeout(() => setCurrentStep('verify'), 2000);
+      
+    } catch (e: any) {
+      addStatus(`❌ Error: ${e?.message || 'Unknown error'}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Verify DNS propagation
   const runVerification = async () => {
-    setVerifying(true);
+    setLoading(true);
     const names = [
       `${domain}`,
       `_dmarc.${domain}`,
-      `${selector1 || 's1'}._domainkey.${domain}`,
-      `${selector2 || 's2'}._domainkey.${domain}`,
+      `${selector1}._domainkey.${domain}`,
+      `${selector2}._domainkey.${domain}`,
     ];
     const results: Record<string, { ok: boolean; values: string[] }> = {};
+    
     for (const n of names) {
       const r = await queryTxt(n);
       results[n] = { ok: r.found, values: r.values };
     }
+    
     setVerifyResults(results);
-    setVerifying(false);
-  };
-
-  const autoCreateInCloudflare = async () => {
-    const newErrors: Record<string, string> = {};
-    if (!domain || !/^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$/.test(domain)) newErrors.domain = 'Enter a valid domain (e.g., example.com)';
-    if (!cfToken) newErrors.cfToken = 'Cloudflare API token is required for automation';
-    setErrors(newErrors);
-    if (Object.keys(newErrors).length) return;
-    setBusy(true); setResultMsg('');
-    const creds: CloudflareCredentials = { apiToken: cfToken };
-    let zoneId = cfZoneId;
-    if (!zoneId) {
-      const z = await cloudflareService.findZoneByName(domain, creds);
-      if (z.ok && z.data && z.data[0]) zoneId = z.data[0].id;
-      else {
-        setBusy(false);
-        setResultMsg(z.error || 'Zone not found. Ensure domain is added to Cloudflare.');
-        return;
-      }
-    }
-    const res = await cloudflareService.createDnsRecords(zoneId, cfRecords as any, creds);
-    const failures = res.filter(r => !r.ok);
-    setBusy(false);
-    if (failures.length === 0) setResultMsg('All DNS records created successfully in Cloudflare.');
-    else setResultMsg(`Some records failed: ${failures.map(f => `${f.input.type} ${f.input.name} (${f.error || f.status})`).join(', ')}`);
-  };
-
-  const downloadBindZone = () => {
-    const blob = new Blob([bindZone], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = `${domain.replace(/\./g,'_')}_zone.txt`;
-    document.body.appendChild(a); a.click();
-    document.body.removeChild(a); URL.revokeObjectURL(url);
-  };
-
-  const manualText = useMemo(() => humanInstructions(generated, providerGuide as any), [generated, providerGuide]);
-
-  const handleGenerateDkim = async (selector: 's1' | 's2') => {
-    const pair = await generateDkimKeyPair();
-    const base64Pub = extractPublicKeyBase64(pair.publicKeyPem);
-    if (selector === 's1') {
-      setDkim1(base64Pub);
-      setGeneratedKeys(k => {
-        const next = { ...k, s1: { pub: pair.publicKeyPem, priv: pair.privateKeyPem } };
-        try { localStorage.setItem('inboxgrove_dkim_bundle', JSON.stringify(next)); } catch {}
-        return next;
-      });
-    } else {
-      setDkim2(base64Pub);
-      setGeneratedKeys(k => {
-        const next = { ...k, s2: { pub: pair.publicKeyPem, priv: pair.privateKeyPem } };
-        try { localStorage.setItem('inboxgrove_dkim_bundle', JSON.stringify(next)); } catch {}
-        return next;
-      });
+    setLoading(false);
+    
+    // Check if all passed
+    const allPassed = Object.values(results).every(r => r.ok);
+    if (allPassed) {
+      setTimeout(() => setCurrentStep('complete'), 1500);
     }
   };
 
-  const exportDkimJson = () => {
-    const blob = new Blob([JSON.stringify(generatedKeys, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = `${domain.replace(/\./g,'_')}_dkim_bundle.json`;
-    document.body.appendChild(a); a.click();
-    document.body.removeChild(a); URL.revokeObjectURL(url);
+  // Navigation
+  const canProgress = () => {
+    if (currentStep === 'domain') return validateDomain();
+    if (currentStep === 'cloudflare') return cfConnected;
+    if (currentStep === 'dkim') return dkim1 && dkim2;
+    if (currentStep === 'deploy') return deployStatus.some(s => s.includes('🎉'));
+    if (currentStep === 'verify') return Object.keys(verifyResults).length > 0;
+    return true;
   };
 
-  const importDkimJson = async (file: File) => {
-    const text = await file.text();
-    try {
-      const parsed = JSON.parse(text);
-      setGeneratedKeys(parsed);
-      if (parsed?.s1?.pub) setDkim1(extractPublicKeyBase64(parsed.s1.pub));
-      if (parsed?.s2?.pub) setDkim2(extractPublicKeyBase64(parsed.s2.pub));
-      localStorage.setItem('inboxgrove_dkim_bundle', JSON.stringify(parsed));
-    } catch {}
+  const handleNext = () => {
+    if (!canProgress()) return;
+    
+    const nextIndex = currentStepIndex + 1;
+    if (nextIndex < steps.length) {
+      setCurrentStep(steps[nextIndex].id);
+    }
   };
+
+  const handleBack = () => {
+    const prevIndex = currentStepIndex - 1;
+    if (prevIndex >= 0) {
+      setCurrentStep(steps[prevIndex].id);
+    }
+  };
+
 
   return (
-    <section id="domain-setup" className="py-16">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <motion.h2 initial={{ opacity: 0, y: 10 }} whileInView={{ opacity: 1, y: 0 }} className="text-3xl font-bold text-white mb-6 flex items-center gap-3">
-          <Globe className="text-primary" /> Domain Setup & DNS Automation
-        </motion.h2>
+    <div className="min-h-screen bg-[#0a0a0a] py-12 px-4">
+      <div className="max-w-4xl mx-auto">
+        {/* Wizard Header */}
+        <motion.div initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} className="mb-12">
+          <div className="flex items-center gap-3 mb-3">
+            <Globe className="text-primary w-8 h-8" />
+            <h1 className="text-3xl font-bold text-white">Domain Setup Wizard</h1>
+          </div>
+          <p className="text-slate-400">Complete domain configuration with automated DNS and mail server provisioning</p>
+        </motion.div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-          {/* Config */}
-          <motion.div initial={{ opacity: 0, y: 10 }} whileInView={{ opacity: 1, y: 0 }} className="glass-panel p-6 rounded-xl border border-border">
-            <h3 className="text-lg font-bold text-white mb-4">1) Domain & DKIM</h3>
-            <label className="block text-sm text-slate-400">Domain</label>
-            <input value={domain} onChange={(e)=>setDomain(e.target.value)} className="w-full mt-1 px-3 py-2 bg-surface border border-border rounded-lg text-white" placeholder="example.com" />
-            {errors.domain && <p className="text-red-400 text-xs mt-1">{errors.domain}</p>}
-            <div className="grid grid-cols-2 gap-3 mt-4">
-              <div>
-                <label className="block text-sm text-slate-400">Selector 1</label>
-                <input value={selector1} onChange={(e)=>setSelector1(e.target.value)} className="w-full mt-1 px-3 py-2 bg-surface border border-border rounded-lg text-white" />
-              </div>
-              <div>
-                <label className="block text-sm text-slate-400">Selector 2</label>
-                <input value={selector2} onChange={(e)=>setSelector2(e.target.value)} className="w-full mt-1 px-3 py-2 bg-surface border border-border rounded-lg text-white" />
-              </div>
+        {/* Progress Steps */}
+        <div className="mb-12">
+          <div className="flex items-center justify-between relative">
+            {/* Progress Line */}
+            <div className="absolute top-5 left-0 right-0 h-1 bg-slate-800 -z-10">
+              <motion.div 
+                className="h-full bg-gradient-to-r from-primary to-secondary"
+                initial={{ width: '0%' }}
+                animate={{ width: `${(currentStepIndex / (steps.length - 1)) * 100}%` }}
+                transition={{ duration: 0.3 }}
+              />
             </div>
-            <div className="mt-4">
-              <label className="block text-sm text-slate-400">DKIM Public Key (s1)</label>
-              <textarea value={dkim1} onChange={(e)=>setDkim1(e.target.value)} className="w-full mt-1 px-3 py-2 bg-surface border border-border rounded-lg text-white h-20" placeholder="Paste RSA public key (optional)" />
-              <div className="mt-2 flex gap-2">
-                <button onClick={()=>handleGenerateDkim('s1')} className="px-3 py-2 bg-slate-800 border border-border rounded-lg text-white text-xs font-bold">Generate Key</button>
-                {generatedKeys.s1 && (
-                  <button onClick={()=>navigator.clipboard.writeText(generatedKeys.s1!.priv)} className="px-3 py-2 bg-slate-800 border border-border rounded-lg text-white text-xs font-bold">Copy Private Key</button>
-                )}
-                <button onClick={exportDkimJson} className="px-3 py-2 bg-slate-800 border border-border rounded-lg text-white text-xs font-bold">Export DKIM</button>
-                <label className="px-3 py-2 bg-slate-800 border border-border rounded-lg text-white text-xs font-bold cursor-pointer">
-                  Import DKIM
-                  <input type="file" accept="application/json" className="hidden" onChange={(e)=>{const f=e.target.files?.[0]; if (f) importDkimJson(f);}} />
-                </label>
-              </div>
-            </div>
-            <div className="mt-3">
-              <label className="block text-sm text-slate-400">DKIM Public Key (s2)</label>
-              <textarea value={dkim2} onChange={(e)=>setDkim2(e.target.value)} className="w-full mt-1 px-3 py-2 bg-surface border border-border rounded-lg text-white h-20" placeholder="Paste RSA public key (optional)" />
-              <div className="mt-2 flex gap-2">
-                <button onClick={()=>handleGenerateDkim('s2')} className="px-3 py-2 bg-slate-800 border border-border rounded-lg text-white text-xs font-bold">Generate Key</button>
-                {generatedKeys.s2 && (
-                  <button onClick={()=>navigator.clipboard.writeText(generatedKeys.s2!.priv)} className="px-3 py-2 bg-slate-800 border border-border rounded-lg text-white text-xs font-bold">Copy Private Key</button>
-                )}
-                <button onClick={exportDkimJson} className="px-3 py-2 bg-slate-800 border border-border rounded-lg text-white text-xs font-bold">Export DKIM</button>
-                <label className="px-3 py-2 bg-slate-800 border border-border rounded-lg text-white text-xs font-bold cursor-pointer">
-                  Import DKIM
-                  <input type="file" accept="application/json" className="hidden" onChange={(e)=>{const f=e.target.files?.[0]; if (f) importDkimJson(f);}} />
-                </label>
-              </div>
-            </div>
-            <p className="mt-4 text-slate-500 text-sm">We generate SPF, DKIM, and DMARC automatically.
-            </p>
-          </motion.div>
-
-          {/* Automation via Cloudflare */}
-          <motion.div initial={{ opacity: 0, y: 10 }} whileInView={{ opacity: 1, y: 0 }} className="glass-panel p-6 rounded-xl border border-border">
-            <h3 className="text-lg font-bold text-white mb-4">2) Auto-Create in Cloudflare</h3>
-            <div className="flex items-center gap-2 text-slate-400 mb-2"><Cloud className="text-primary" /> Provide token with DNS edit permissions</div>
-            <label className="block text-sm text-slate-400">API Token</label>
-            <input value={cfToken} onChange={(e)=>setCfToken(e.target.value)} className="w-full mt-1 px-3 py-2 bg-surface border border-border rounded-lg text-white" placeholder="cf_token_..." />
-            {errors.cfToken && <p className="text-red-400 text-xs mt-1">{errors.cfToken}</p>}
-            <label className="block text-sm text-slate-400 mt-3">Zone ID (optional)</label>
-            <input value={cfZoneId} onChange={(e)=>setCfZoneId(e.target.value)} className="w-full mt-1 px-3 py-2 bg-surface border border-border rounded-lg text-white" placeholder="auto-detect by domain if empty" />
-            <button disabled={!cfToken || busy} onClick={autoCreateInCloudflare} className="mt-4 w-full py-3 bg-primary hover:bg-primary-glow text-white font-bold rounded-lg flex items-center justify-center gap-2">
-              <Shield size={18}/> {busy ? 'Working...' : 'Create DNS Records'}
-            </button>
-            {resultMsg && <p className="mt-3 text-sm text-slate-300">{resultMsg}</p>}
-            <div className="mt-6">
-              <h4 className="text-sm font-bold text-white mb-2">Import options</h4>
-              <div className="grid grid-cols-2 gap-3">
-                <button onClick={downloadBindZone} className="px-4 py-2 bg-slate-800 border border-border rounded-lg text-white font-bold flex items-center gap-2">
-                  <FileDown size={16}/> BIND Zone (Cloudflare)
-                </button>
-                <button onClick={downloadCsv} className="px-4 py-2 bg-slate-800 border border-border rounded-lg text-white font-bold flex items-center gap-2">
-                  <FileDown size={16}/> DNS CSV
-                </button>
-              </div>
-            </div>
-          </motion.div>
-          {/* KumoMTA Integration */}
-          <motion.div initial={{ opacity: 0, y: 10 }} whileInView={{ opacity: 1, y: 0 }} className="glass-panel p-6 rounded-xl border border-border">
-            <h3 className="text-lg font-bold text-white mb-4">2.5) KumoMTA Integration</h3>
-            <p className="text-slate-400 text-sm mb-3">Complete workflow: domain + DKIM + DNS + user creation</p>
-            <label className="block text-sm text-slate-400">KumoMTA Base URL</label>
-            <input value={kumoBaseUrl} onChange={(e)=>setKumoBaseUrl(e.target.value)} className="w-full mt-1 px-3 py-2 bg-surface border border-border rounded-lg text-white" placeholder="http://46.21.157.216:8001" />
-            <label className="block text-sm text-slate-400 mt-3">KumoMTA API Key</label>
-            <input value={kumoApiKey} onChange={(e)=>setKumoApiKey(e.target.value)} className="w-full mt-1 px-3 py-2 bg-surface border border-border rounded-lg text-white" placeholder="API Key" />
-            <button 
-              disabled={kumoWorking || !domain}
-              onClick={async ()=>{
-                setKumoMsg(''); setKumoWorking(true);
-                const creds: KumoCredentials = { baseUrl: kumoBaseUrl, apiKey: kumoApiKey };
-                
-                try {
-                  // 1. Add domain
-                  const d = await kumoMtaService.createDomain({ domain, selector: selector1 || 'default' }, creds);
-                  if (!d.ok) {
-                    setKumoMsg(`❌ Domain create failed: ${d.error}`);
-                    setKumoWorking(false);
-                    return;
-                  }
-                  setKumoMsg('✅ Domain added');
-                  
-                  // 2. Generate DKIM
-                  const dkim = await kumoMtaService.generateDkim({ domain, selector: selector1 || 'default', key_size: 2048 }, creds);
-                  if (!dkim.ok) {
-                    setKumoMsg(`❌ DKIM generation failed: ${dkim.error}`);
-                    setKumoWorking(false);
-                    return;
-                  }
-                  setKumoMsg('✅ DKIM generated');
-                  
-                  // Update DKIM field with generated key
-                  if (dkim.data?.public_key) {
-                    setDkim1(dkim.data.public_key);
-                  }
-                  
-                  // 3. Get DNS records
-                  const dns = await kumoMtaService.getDnsRecords(domain, mailIps, creds);
-                  if (!dns.ok || !dns.data) {
-                    setKumoMsg(`❌ DNS fetch failed: ${dns.error}`);
-                    setKumoWorking(false);
-                    return;
-                  }
-                  setKumoMsg('✅ DNS records fetched');
-                  
-                  // 4. Create user
-                  const username = `user_${domain.replace(/\./g, '_')}`;
-                  const password = `Pwd${Math.random().toString(36).slice(2, 10)}${Math.random().toString(36).slice(2, 10).toUpperCase()}!`;
-                  const user = await kumoMtaService.createUser({ username, password, email: `admin@${domain}` }, creds);
-                  if (!user.ok) {
-                    setKumoMsg(`❌ User creation failed: ${user.error}`);
-                    setKumoWorking(false);
-                    return;
-                  }
-                  setKumoMsg(`✅ User created: ${username} / ${password}`);
-                  
-                  // 5. Reload KumoMTA
-                  const reload = await kumoMtaService.reloadConfig(creds);
-                  if (!reload.ok) {
-                    setKumoMsg(`⚠️ Reload failed: ${reload.error}. Changes may require manual reload.`);
-                  } else {
-                    setKumoMsg(`✅ Complete! User: ${username} | Pass: ${password}`);
-                  }
-                  
-                  // 6. Apply to Cloudflare if token provided
-                  if (cfToken && dns.data) {
-                    const cf = { apiToken: cfToken } as CloudflareCredentials;
-                    let zoneId = cfZoneId;
-                    if (!zoneId) {
-                      const z = await cloudflareService.findZoneByName(domain, cf);
-                      if (z.ok && z.data && z.data[0]) zoneId = z.data[0].id;
-                    }
-                    if (zoneId) {
-                      // Convert KumoMTA records to Cloudflare format
-                      const cfRecords = dns.data.records.map(r => ({
-                        type: r.record_type,
-                        name: r.name,
-                        content: r.value,
-                        ttl: r.ttl || 1,
-                        priority: r.priority,
-                      }));
-                      await cloudflareService.createDnsRecords(zoneId, cfRecords as any, cf);
-                      setKumoMsg(prev => prev + ' | DNS applied to Cloudflare ✅');
-                    }
-                  }
-                  
-                } catch (e: any) {
-                  setKumoMsg(`❌ Error: ${e?.message || 'Unknown error'}`);
-                }
-                setKumoWorking(false);
-              }} 
-              className="mt-4 w-full py-3 bg-neon-green hover:bg-emerald-400 disabled:opacity-50 disabled:cursor-not-allowed text-slate-900 font-bold rounded-lg flex items-center justify-center gap-2"
-            >
-              <Shield size={18}/> {kumoWorking ? 'Processing...' : 'Complete Setup (KumoMTA → Cloudflare)'}
-            </button>
-            {kumoMsg && <div className="mt-3 p-3 bg-slate-900 rounded-lg border border-border text-sm text-slate-300 whitespace-pre-wrap">{kumoMsg}</div>}
-          </motion.div>
-
-          {/* Manual Instructions */}
-          <motion.div initial={{ opacity: 0, y: 10 }} whileInView={{ opacity: 1, y: 0 }} className="glass-panel p-6 rounded-xl border border-border">
-            <h3 className="text-lg font-bold text-white mb-4">3) Manual DNS Instructions</h3>
-            <label className="block text-sm text-slate-400">DNS Provider</label>
-            <select value={providerGuide} onChange={(e)=>setProviderGuide(e.target.value)} className="w-full mt-1 px-3 py-2 bg-surface border border-border rounded-lg text-white">
-              <option>Cloudflare</option>
-              <option>GoDaddy</option>
-              <option>Namecheap</option>
-              <option>AWS Route 53</option>
-              <option>Google Domains</option>
-            </select>
-            <div className="mt-4 bg-background rounded-lg border border-border p-3 font-mono text-xs text-slate-300 whitespace-pre-wrap">
-              {manualText}
-            </div>
-            <div className="mt-3 bg-slate-900 rounded-lg border border-border p-3 text-xs">
-              <div className="font-bold text-white mb-2">Provider Guide</div>
-              {(() => {
-                const g = getGuide(providerGuide as any);
-                return (
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <div className="text-slate-400 font-bold mb-1">Steps</div>
-                      <ul className="list-disc list-inside space-y-1">
-                        {g.steps.map((s, i) => (<li key={i}>{s}</li>))}
-                      </ul>
-                    </div>
-                    <div>
-                      <div className="text-slate-400 font-bold mb-1">Tips</div>
-                      <ul className="list-disc list-inside space-y-1">
-                        {g.tips.map((t, i) => (<li key={i}>{t}</li>))}
-                      </ul>
+            
+            {steps.map((step, idx) => {
+              const isComplete = idx < currentStepIndex;
+              const isCurrent = idx === currentStepIndex;
+              
+              return (
+                <div key={step.id} className="flex flex-col items-center relative">
+                  <motion.div 
+                    className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-sm border-2 transition-all
+                      ${isComplete ? 'bg-primary border-primary text-white' : ''}
+                      ${isCurrent ? 'bg-primary border-primary text-white shadow-[0_0_20px_rgba(99,102,241,0.5)]' : ''}
+                      ${!isComplete && !isCurrent ? 'bg-slate-800 border-slate-700 text-slate-500' : ''}
+                    `}
+                    initial={{ scale: 0 }}
+                    animate={{ scale: 1 }}
+                    transition={{ delay: idx * 0.1 }}
+                  >
+                    {isComplete ? <Check size={18} /> : idx + 1}
+                  </motion.div>
+                  <div className="mt-2 text-center hidden md:block">
+                    <div className={`text-xs font-bold ${isCurrent ? 'text-white' : 'text-slate-500'}`}>
+                      {step.title}
                     </div>
                   </div>
-                );
-              })()}
-            </div>
-            <div className="mt-3 grid grid-cols-2 gap-2">
-              <button onClick={runVerification} className="px-4 py-2 bg-slate-800 border border-border rounded-lg text-white font-bold">
-                {verifying ? 'Verifying...' : 'Verify DNS Records'}
-              </button>
-              <button onClick={()=>{navigator.clipboard.writeText(manualText)}} className="px-4 py-2 bg-slate-800 border border-border rounded-lg text-white font-bold flex items-center gap-2">
-                <Copy size={16}/> Copy Instructions
-              </button>
-            </div>
-            {Object.keys(verifyResults).length > 0 && (
-              <div className="mt-3 bg-slate-900 rounded-lg border border-border p-3 text-xs">
-                <div className="font-bold text-white mb-2">Verification Results</div>
-                {(() => {
-                  const expectedMap: Record<string, string> = {
-                    [domain]: generated.spf.value,
-                    [`_dmarc.${domain}`]: generated.dmarc.value,
-                    [`${(selector1 || 's1')}._domainkey.${domain}`]: (generated.dkim.find(d => d.selector === (selector1 || 's1'))?.value) || '',
-                    [`${(selector2 || 's2')}._domainkey.${domain}`]: (generated.dkim.find(d => d.selector === (selector2 || 's2'))?.value) || '',
-                  };
-                  return Object.entries(verifyResults).map(([host, r]: [string, { ok: boolean; values: string[] }]) => {
-                    const expected = expectedMap[host] || '';
-                    const matches = r.values.some(v => v.trim().replace(/\s+/g,' ') === expected.trim().replace(/\s+/g,' '));
-                    return (
-                      <div key={host} className="py-3 border-b border-border/40 last:border-0">
-                        <div className="flex items-center justify-between">
-                          <span className="text-slate-300">{host}</span>
-                          <span className={(r.ok && matches) ? 'text-neon-green' : r.ok ? 'text-amber-400' : 'text-red-400'}>
-                            {(r.ok && matches) ? 'MATCH' : r.ok ? 'MISMATCH' : 'NOT FOUND'}
-                          </span>
-                        </div>
-                        <div className="mt-1 grid grid-cols-2 gap-3">
-                          <div>
-                            <div className="text-slate-400 font-bold">Expected</div>
-                            <div className="text-slate-500 break-words">{expected || '—'}</div>
-                          </div>
-                          <div>
-                            <div className="text-slate-400 font-bold">Actual</div>
-                            <div className="text-slate-500 break-words">{r.values.length ? r.values.join(' | ') : '—'}</div>
-                          </div>
-                        </div>
-                        <div className="mt-2 flex gap-2">
-                          <button onClick={()=>navigator.clipboard.writeText(expected)} className="px-3 py-1 bg-slate-800 border border-border rounded-lg text-white">Copy Expected</button>
-                          {r.values.length > 0 && (
-                            <button onClick={()=>navigator.clipboard.writeText(r.values.join(' '))} className="px-3 py-1 bg-slate-800 border border-border rounded-lg text-white">Copy Actual</button>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  });
-                })()}
-              </div>
-            )}
-            <div className="mt-4 text-slate-500 text-xs flex items-center gap-2"><KeyRound size={14}/> Replace DKIM keys with your actual public keys for production.</div>
-            <div className="mt-3 text-neon-green text-xs flex items-center gap-2"><CheckCircle size={14}/> After adding records, verify in your provider and start warmup.</div>
-          </motion.div>
+                </div>
+              );
+            })}
+          </div>
         </div>
+
+        {/* Step Content */}
+        <motion.div 
+          key={currentStep}
+          initial={{ opacity: 0, x: 20 }}
+          animate={{ opacity: 1, x: 0 }}
+          exit={{ opacity: 0, x: -20 }}
+          className="glass-panel p-8 rounded-xl border border-border mb-6"
+        >
+          <h2 className="text-2xl font-bold text-white mb-2">{steps[currentStepIndex].title}</h2>
+          <p className="text-slate-400 mb-6">{steps[currentStepIndex].subtitle}</p>
+
+          {/* Step 1: Domain */}
+          {currentStep === 'domain' && (
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-bold text-slate-300 mb-2">Domain Name</label>
+                <input 
+                  value={domain} 
+                  onChange={(e) => setDomain(e.target.value)}
+                  onBlur={validateDomain}
+                  className="w-full px-4 py-3 bg-slate-900 border border-slate-700 rounded-lg text-white placeholder-slate-500 focus:border-primary focus:ring-2 focus:ring-primary/20 outline-none transition-all"
+                  placeholder="example.com"
+                  autoFocus
+                />
+                {errors.domain && (
+                  <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-red-400 text-sm mt-2 flex items-center gap-2">
+                    <AlertCircle size={16} /> {errors.domain}
+                  </motion.p>
+                )}
+              </div>
+              <div className="bg-slate-900/50 border border-slate-800 rounded-lg p-4">
+                <h4 className="font-bold text-white mb-2 flex items-center gap-2">
+                  <Shield size={16} className="text-primary" />
+                  What we'll configure:
+                </h4>
+                <ul className="space-y-2 text-sm text-slate-400">
+                  <li className="flex items-start gap-2"><span className="text-neon-green">✓</span> SPF (Sender Policy Framework) records</li>
+                  <li className="flex items-start gap-2"><span className="text-neon-green">✓</span> DKIM (Domain Keys Identified Mail) with dual selectors</li>
+                  <li className="flex items-start gap-2"><span className="text-neon-green">✓</span> DMARC (Domain Message Authentication) policy</li>
+                  <li className="flex items-start gap-2"><span className="text-neon-green">✓</span> KumoMTA mail server provisioning</li>
+                  <li className="flex items-start gap-2"><span className="text-neon-green">✓</span> SMTP credentials generation</li>
+                </ul>
+              </div>
+            </div>
+          )}
+
+          {/* Step 2: Cloudflare */}
+          {currentStep === 'cloudflare' && (
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-bold text-slate-300 mb-2">Cloudflare API Token</label>
+                <input 
+                  type="password"
+                  value={cfToken} 
+                  onChange={(e) => setCfToken(e.target.value)}
+                  className="w-full px-4 py-3 bg-slate-900 border border-slate-700 rounded-lg text-white placeholder-slate-500 focus:border-primary focus:ring-2 focus:ring-primary/20 outline-none transition-all"
+                  placeholder="Enter your Cloudflare API token..."
+                />
+                {errors.cfToken && (
+                  <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-red-400 text-sm mt-2 flex items-center gap-2">
+                    <AlertCircle size={16} /> {errors.cfToken}
+                  </motion.p>
+                )}
+                <p className="text-xs text-slate-500 mt-2">Need DNS edit permissions. <a href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">Create token</a></p>
+              </div>
+
+              <button
+                onClick={testCloudflareConnection}
+                disabled={!cfToken || loading}
+                className="w-full py-3 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold rounded-lg flex items-center justify-center gap-2 transition-all"
+              >
+                {loading ? (
+                  <><Loader className="animate-spin" size={18} /> Testing Connection...</>
+                ) : cfConnected ? (
+                  <><Check className="text-neon-green" size={18} /> Connected to Zone: {cfZoneId.slice(0, 8)}...</>
+                ) : (
+                  <><Cloud size={18} /> Test Connection</>
+                )}
+              </button>
+
+              {cfConnected && (
+                <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} className="bg-emerald-900/20 border border-emerald-500/30 rounded-lg p-4">
+                  <div className="flex items-center gap-2 text-neon-green font-bold mb-2">
+                    <CheckCircle size={18} />
+                    Connection Successful
+                  </div>
+                  <p className="text-sm text-slate-300">Domain found in Cloudflare. DNS records will be automatically created.</p>
+                </motion.div>
+              )}
+
+              <div className="bg-slate-900/50 border border-slate-800 rounded-lg p-4">
+                <h4 className="font-bold text-white mb-2 flex items-center gap-2">
+                  <Cloud size={16} className="text-primary" />
+                  Requirements:
+                </h4>
+                <ul className="space-y-2 text-sm text-slate-400">
+                  <li className="flex items-start gap-2"><span className="text-amber-400">→</span> Domain must already be added to your Cloudflare account</li>
+                  <li className="flex items-start gap-2"><span className="text-amber-400">→</span> API token needs Zone:DNS:Edit permissions</li>
+                  <li className="flex items-start gap-2"><span className="text-amber-400">→</span> We'll auto-detect your zone and create all records</li>
+                </ul>
+              </div>
+            </div>
+          )}
+
+          {/* Step 3: DKIM */}
+          {currentStep === 'dkim' && (
+            <div className="space-y-6">
+              <div className="bg-slate-900/50 border border-slate-800 rounded-lg p-4 mb-4">
+                <p className="text-sm text-slate-300">We'll generate two DKIM selectors for key rotation and redundancy. Click generate for each selector.</p>
+              </div>
+
+              <div className="space-y-4">
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="block text-sm font-bold text-slate-300">DKIM Selector 1 ({selector1})</label>
+                    <button
+                      onClick={() => handleGenerateDkim('s1')}
+                      disabled={loading}
+                      className="px-4 py-2 bg-primary hover:bg-primary-glow disabled:opacity-50 text-white font-bold rounded-lg flex items-center gap-2 transition-all text-sm"
+                    >
+                      {loading ? <Loader className="animate-spin" size={14} /> : <KeyRound size={14} />}
+                      Generate
+                    </button>
+                  </div>
+                  <textarea 
+                    value={dkim1} 
+                    readOnly
+                    className="w-full px-4 py-3 bg-slate-900 border border-slate-700 rounded-lg text-white font-mono text-xs h-24 resize-none"
+                    placeholder="Public key will appear here..."
+                  />
+                  {dkim1 && (
+                    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex gap-2 mt-2">
+                      <button onClick={() => navigator.clipboard.writeText(dkim1)} className="text-xs text-primary hover:underline">Copy Public</button>
+                      {generatedKeys.s1 && (
+                        <button onClick={() => navigator.clipboard.writeText(generatedKeys.s1!.priv)} className="text-xs text-primary hover:underline">Copy Private</button>
+                      )}
+                    </motion.div>
+                  )}
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="block text-sm font-bold text-slate-300">DKIM Selector 2 ({selector2})</label>
+                    <button
+                      onClick={() => handleGenerateDkim('s2')}
+                      disabled={loading}
+                      className="px-4 py-2 bg-primary hover:bg-primary-glow disabled:opacity-50 text-white font-bold rounded-lg flex items-center gap-2 transition-all text-sm"
+                    >
+                      {loading ? <Loader className="animate-spin" size={14} /> : <KeyRound size={14} />}
+                      Generate
+                    </button>
+                  </div>
+                  <textarea 
+                    value={dkim2} 
+                    readOnly
+                    className="w-full px-4 py-3 bg-slate-900 border border-slate-700 rounded-lg text-white font-mono text-xs h-24 resize-none"
+                    placeholder="Public key will appear here..."
+                  />
+                  {dkim2 && (
+                    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex gap-2 mt-2">
+                      <button onClick={() => navigator.clipboard.writeText(dkim2)} className="text-xs text-primary hover:underline">Copy Public</button>
+                      {generatedKeys.s2 && (
+                        <button onClick={() => navigator.clipboard.writeText(generatedKeys.s2!.priv)} className="text-xs text-primary hover:underline">Copy Private</button>
+                      )}
+                    </motion.div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Step 4: Deploy */}
+          {currentStep === 'deploy' && (
+            <div className="space-y-4">
+              {deployStatus.length === 0 ? (
+                <div className="text-center py-12">
+                  <Shield className="w-16 h-16 text-primary mx-auto mb-4" />
+                  <h3 className="text-xl font-bold text-white mb-2">Ready to Deploy</h3>
+                  <p className="text-slate-400 mb-6">We'll provision your mail infrastructure and configure DNS automatically.</p>
+                  <button
+                    onClick={deployInfrastructure}
+                    disabled={loading}
+                    className="px-8 py-4 bg-gradient-to-r from-primary to-secondary hover:shadow-[0_0_30px_rgba(99,102,241,0.5)] text-white font-bold rounded-lg flex items-center gap-2 mx-auto transition-all"
+                  >
+                    {loading ? <Loader className="animate-spin" size={20} /> : <Shield size={20} />}
+                    Start Deployment
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-2 max-h-96 overflow-y-auto">
+                  {deployStatus.map((status, idx) => (
+                    <motion.div
+                      key={idx}
+                      initial={{ opacity: 0, x: -20 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      transition={{ delay: idx * 0.1 }}
+                      className="flex items-start gap-3 py-2 px-4 bg-slate-900 rounded-lg border border-slate-800"
+                    >
+                      <span className="text-sm font-mono">{status}</span>
+                    </motion.div>
+                  ))}
+                </div>
+              )}
+
+              {smtpCredentials && (
+                <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="bg-emerald-900/20 border border-emerald-500/30 rounded-lg p-6 mt-4">
+                  <h4 className="font-bold text-white mb-3 flex items-center gap-2">
+                    <CheckCircle className="text-neon-green" size={18} />
+                    SMTP Credentials Created
+                  </h4>
+                  <div className="space-y-2 font-mono text-sm">
+                    <div><span className="text-slate-400">Username:</span> <span className="text-white">{smtpCredentials.username}</span></div>
+                    <div><span className="text-slate-400">Password:</span> <span className="text-white">{smtpCredentials.password}</span></div>
+                  </div>
+                  <button onClick={() => navigator.clipboard.writeText(JSON.stringify(smtpCredentials, null, 2))} className="mt-3 text-xs text-primary hover:underline">Copy Credentials</button>
+                </motion.div>
+              )}
+            </div>
+          )}
+
+          {/* Step 5: Verify */}
+          {currentStep === 'verify' && (
+            <div className="space-y-4">
+              <div className="bg-slate-900/50 border border-slate-800 rounded-lg p-4 mb-4">
+                <p className="text-sm text-slate-300">DNS propagation can take 5-30 minutes. We'll check if your records are publicly visible.</p>
+              </div>
+
+              <button
+                onClick={runVerification}
+                disabled={loading}
+                className="w-full py-3 bg-primary hover:bg-primary-glow disabled:opacity-50 text-white font-bold rounded-lg flex items-center justify-center gap-2 transition-all"
+              >
+                {loading ? <Loader className="animate-spin" size={18} /> : <Shield size={18} />}
+                {Object.keys(verifyResults).length === 0 ? 'Run Verification' : 'Re-check DNS'}
+              </button>
+
+              {Object.keys(verifyResults).length > 0 && (
+                <div className="space-y-3 mt-6">
+                  {Object.entries(verifyResults).map(([name, result]) => (
+                    <motion.div
+                      key={name}
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className={`p-4 rounded-lg border ${result.ok ? 'bg-emerald-900/20 border-emerald-500/30' : 'bg-red-900/20 border-red-500/30'}`}
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="font-mono text-sm text-white">{name}</span>
+                        {result.ok ? (
+                          <CheckCircle className="text-neon-green" size={18} />
+                        ) : (
+                          <AlertCircle className="text-red-400" size={18} />
+                        )}
+                      </div>
+                      {result.values.length > 0 && (
+                        <div className="text-xs text-slate-400 font-mono break-all">{result.values[0]}</div>
+                      )}
+                    </motion.div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Step 6: Complete */}
+          {currentStep === 'complete' && (
+            <div className="text-center py-12">
+              <motion.div
+                initial={{ scale: 0 }}
+                animate={{ scale: 1 }}
+                transition={{ type: 'spring', duration: 0.6 }}
+              >
+                <CheckCircle className="w-24 h-24 text-neon-green mx-auto mb-6" />
+              </motion.div>
+              <h3 className="text-2xl font-bold text-white mb-3">Setup Complete! 🎉</h3>
+              <p className="text-slate-400 mb-8">Your domain {domain} is now configured and ready for cold email campaigns.</p>
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-2xl mx-auto">
+                <div className="bg-slate-900 border border-slate-700 rounded-lg p-4">
+                  <div className="text-primary font-bold mb-1">DNS Records</div>
+                  <div className="text-2xl font-bold text-white">✓ Active</div>
+                </div>
+                <div className="bg-slate-900 border border-slate-700 rounded-lg p-4">
+                  <div className="text-primary font-bold mb-1">Mail Server</div>
+                  <div className="text-2xl font-bold text-white">✓ Provisioned</div>
+                </div>
+                <div className="bg-slate-900 border border-slate-700 rounded-lg p-4">
+                  <div className="text-primary font-bold mb-1">DKIM Keys</div>
+                  <div className="text-2xl font-bold text-white">✓ Generated</div>
+                </div>
+                <div className="bg-slate-900 border border-slate-700 rounded-lg p-4">
+                  <div className="text-primary font-bold mb-1">SMTP Access</div>
+                  <div className="text-2xl font-bold text-white">✓ Ready</div>
+                </div>
+              </div>
+
+              <button
+                onClick={() => window.location.href = '/dashboard'}
+                className="mt-8 px-8 py-4 bg-gradient-to-r from-primary to-secondary hover:shadow-[0_0_30px_rgba(99,102,241,0.5)] text-white font-bold rounded-lg flex items-center gap-2 mx-auto transition-all"
+              >
+                Go to Dashboard <ArrowRight size={18} />
+              </button>
+            </div>
+          )}
+        </motion.div>
+
+        {/* Navigation Buttons */}
+        {currentStep !== 'complete' && (
+          <div className="flex items-center justify-between">
+            <button
+              onClick={handleBack}
+              disabled={currentStepIndex === 0}
+              className="px-6 py-3 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold rounded-lg flex items-center gap-2 transition-all"
+            >
+              <ArrowLeft size={18} /> Back
+            </button>
+
+            <div className="text-sm text-slate-500">
+              Step {currentStepIndex + 1} of {steps.length}
+            </div>
+
+            <button
+              onClick={handleNext}
+              disabled={!canProgress() || loading}
+              className="px-6 py-3 bg-primary hover:bg-primary-glow disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold rounded-lg flex items-center gap-2 transition-all"
+            >
+              {currentStepIndex === steps.length - 2 ? 'Finish' : 'Next'} <ArrowRight size={18} />
+            </button>
+          </div>
+        )}
       </div>
-    </section>
+    </div>
   );
 };
 
