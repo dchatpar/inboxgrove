@@ -1,0 +1,252 @@
+version: '3.9'
+
+services:
+  # =========================================================================
+  # PostgreSQL Database
+  # =========================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: inboxgrove_postgres
+    environment:
+      POSTGRES_USER: inboxgrove_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-secure_password_change_me}
+      POSTGRES_DB: inboxgrove
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=en_US.UTF-8"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inboxgrove_user -d inboxgrove"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - inboxgrove_network
+
+  # =========================================================================
+  # Redis (Cache + Message Broker)
+  # =========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: inboxgrove_redis
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 1gb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - inboxgrove_network
+
+  # =========================================================================
+  # FastAPI API Service
+  # =========================================================================
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: inboxgrove_api
+    environment:
+      DATABASE_URL: postgresql://inboxgrove_user:${DB_PASSWORD:-secure_password_change_me}@postgres:5432/inboxgrove
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN}
+      CLOUDFLARE_ZONE_ID: ${CLOUDFLARE_ZONE_ID}
+      KUMOMTA_API_URL: http://kumo:8008
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-change-me-aes256-key}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./app:/app/app
+      - ./logs:/app/logs
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - inboxgrove_network
+    command: >
+      sh -c "python -m alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4"
+
+  # =========================================================================
+  # Celery Worker (Background Tasks)
+  # =========================================================================
+  celery_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: inboxgrove_celery_worker
+    environment:
+      DATABASE_URL: postgresql://inboxgrove_user:${DB_PASSWORD:-secure_password_change_me}@postgres:5432/inboxgrove
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN}
+      KUMOMTA_API_URL: http://kumo:8008
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./app:/app/app
+      - ./logs:/app/logs
+    depends_on:
+      - postgres
+      - redis
+      - api
+    networks:
+      - inboxgrove_network
+    command: >
+      celery -A app.workers.celery_app worker
+      --loglevel=${LOG_LEVEL:-info}
+      --concurrency=8
+      --max-tasks-per-child=100
+      --time-limit=3600
+      --soft-time-limit=3500
+
+  # =========================================================================
+  # Celery Beat (Scheduler)
+  # =========================================================================
+  celery_beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: inboxgrove_celery_beat
+    environment:
+      DATABASE_URL: postgresql://inboxgrove_user:${DB_PASSWORD:-secure_password_change_me}@postgres:5432/inboxgrove
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./app:/app/app
+      - ./logs:/app/logs
+    depends_on:
+      - postgres
+      - redis
+      - api
+    networks:
+      - inboxgrove_network
+    command: >
+      celery -A app.workers.celery_app beat
+      --loglevel=${LOG_LEVEL:-info}
+      --scheduler django_celery_beat.schedulers:DatabaseScheduler
+
+  # =========================================================================
+  # KumoMTA (High-Performance SMTP Engine)
+  # =========================================================================
+  kumo:
+    build:
+      context: ./kumo
+      dockerfile: Dockerfile.kumo
+    container_name: inboxgrove_kumo
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      API_BASE_URL: http://api:8000
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - ./kumo/kumo.conf:/etc/kumomta/kumo.conf:ro
+      - ./kumo/redis_datasource.lua:/etc/kumomta/redis_datasource.lua:ro
+      - ./kumo/tls:/etc/kumomta/tls:ro
+      - kumo_data:/var/spool/kumomta
+      - ./logs/kumo:/var/log/kumomta
+    ports:
+      - "25:25"      # SMTP (submission)
+      - "587:587"    # Submission port (STARTTLS)
+      - "993:993"    # IMAPS
+      - "8008:8008"  # KumoMTA API
+    depends_on:
+      - redis
+      - api
+    networks:
+      - inboxgrove_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8008/metrics"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    # Run as non-root for security
+    user: "kumo:kumo"
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+
+  # =========================================================================
+  # Nginx Reverse Proxy (Optional)
+  # =========================================================================
+  nginx:
+    image: nginx:alpine
+    container_name: inboxgrove_nginx
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx_ssl:/etc/nginx/ssl:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - api
+    networks:
+      - inboxgrove_network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # =========================================================================
+  # Prometheus Monitoring (Optional)
+  # =========================================================================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: inboxgrove_prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - inboxgrove_network
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+
+# =========================================================================
+# Volumes for Persistent Data
+# =========================================================================
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  kumo_data:
+    driver: local
+  prometheus_data:
+    driver: local
+
+# =========================================================================
+# Networks
+# =========================================================================
+networks:
+  inboxgrove_network:
+    driver: bridge

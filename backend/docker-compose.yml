@@ -1,0 +1,145 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: inboxgrove-postgres
+    environment:
+      POSTGRES_USER: inboxgrove
+      POSTGRES_PASSWORD: secure_password_change_in_prod
+      POSTGRES_DB: inboxgrove_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inboxgrove"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - inboxgrove-network
+
+  # Redis Cache & Celery Broker
+  redis:
+    image: redis:7-alpine
+    container_name: inboxgrove-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - inboxgrove-network
+
+  # FastAPI Backend
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: inboxgrove-api
+    environment:
+      ENVIRONMENT: development
+      DEBUG: "True"
+      DATABASE_URL: postgresql://inboxgrove:secure_password_change_in_prod@postgres:5432/inboxgrove_db
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: dev-secret-key-change-in-production
+      JWT_SECRET: dev-jwt-secret-change-in-production
+      STRIPE_API_KEY: sk_test_your_test_key
+      STRIPE_WEBHOOK_SECRET: whsec_test_your_webhook_secret
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    networks:
+      - inboxgrove-network
+
+  # Celery Worker
+  celery-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: inboxgrove-celery
+    environment:
+      ENVIRONMENT: development
+      DATABASE_URL: postgresql://inboxgrove:secure_password_change_in_prod@postgres:5432/inboxgrove_db
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      STRIPE_API_KEY: sk_test_your_test_key
+    depends_on:
+      - postgres
+      - redis
+      - api
+    volumes:
+      - .:/app
+    command: celery -A app.tasks.celery_app worker --loglevel=info
+    networks:
+      - inboxgrove-network
+
+  # Celery Beat (scheduler)
+  celery-beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: inboxgrove-celery-beat
+    environment:
+      ENVIRONMENT: development
+      DATABASE_URL: postgresql://inboxgrove:secure_password_change_in_prod@postgres:5432/inboxgrove_db
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      - postgres
+      - redis
+      - api
+    volumes:
+      - .:/app
+    command: celery -A app.tasks.celery_app beat --loglevel=info
+    networks:
+      - inboxgrove-network
+
+  # Adminer (Database UI)
+  adminer:
+    image: adminer:latest
+    container_name: inboxgrove-adminer
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+    networks:
+      - inboxgrove-network
+
+  # Redis Commander (Redis UI)
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: inboxgrove-redis-commander
+    environment:
+      REDIS_HOSTS: local:redis:6379
+    ports:
+      - "8081:8081"
+    depends_on:
+      - redis
+    networks:
+      - inboxgrove-network
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  inboxgrove-network:
+    driver: bridge
